@@ -10,6 +10,7 @@ import (
 
 	blocks "github.com/ipfs/go-block-format"
 	"github.com/ipfs/go-cid"
+	"github.com/ipfs/go-peertaskqueue/peertask"
 	ipld "github.com/ipld/go-ipld-prime"
 	cidlink "github.com/ipld/go-ipld-prime/linking/cid"
 	basicnode "github.com/ipld/go-ipld-prime/node/basic"
@@ -139,12 +140,16 @@ func TestCancellationViaCommand(t *testing.T) {
 func TestEarlyCancellation(t *testing.T) {
 	td := newTestData(t)
 	defer td.cancel()
-	responseManager := td.newResponseManager()
+	// we're not testing the queryexeuctor or taskqueue here, we're testing
+	// that cancellation inside the responsemanager itself is properly
+	// activated, so we won't let responses get far enough to race our
+	// cancellation
+	responseManager := td.nullTaskQueueResponseManager()
 	td.requestHooks.Register(selectorvalidator.SelectorValidator(100))
 	responseManager.Startup()
 	responseManager.ProcessRequests(td.ctx, td.p, td.requests)
-	// responseManager.synchronize()
-	// td.connManager.AssertProtectedWithTags(t, td.p, td.requests[0].ID().Tag())
+	responseManager.synchronize()
+	td.connManager.AssertProtectedWithTags(t, td.p, td.requests[0].ID().Tag())
 
 	// send a cancellation
 	cancelRequests := []gsmsg.GraphSyncRequest{
@@ -1085,6 +1090,12 @@ func (td *testData) newResponseManager() *ResponseManager {
 	return rm
 }
 
+func (td *testData) nullTaskQueueResponseManager() *ResponseManager {
+	ntq := nullTaskQueue{}
+	rm := New(td.ctx, td.persistence, td.responseAssembler, td.requestQueuedHooks, td.requestHooks, td.updateHooks, td.completedListeners, td.cancelledListeners, td.blockSentListeners, td.networkErrorListeners, 6, td.connManager, 0, td.workSignal, ntq)
+	return rm
+}
+
 func (td *testData) alternateLoaderResponseManager() *ResponseManager {
 	obs := make(map[ipld.Link][]byte)
 	persistence := testutil.NewTestStore(obs)
@@ -1249,3 +1260,12 @@ func (td *testData) assertHasNetworkErrors(err error) {
 	testutil.AssertReceive(td.ctx, td.t, td.networkErrorChan, &receivedErr, "should sent block")
 	require.EqualError(td.t, receivedErr, err.Error())
 }
+
+type nullTaskQueue struct{}
+
+func (ntq nullTaskQueue) PushTask(p peer.ID, task peertask.Task)  {}
+func (ntq nullTaskQueue) TaskDone(p peer.ID, task *peertask.Task) {}
+func (ntq nullTaskQueue) Remove(t peertask.Topic, p peer.ID)      {}
+func (ntq nullTaskQueue) Stats() graphsync.RequestStats           { return graphsync.RequestStats{} }
+
+var _ taskqueue.TaskQueue = nullTaskQueue{}
